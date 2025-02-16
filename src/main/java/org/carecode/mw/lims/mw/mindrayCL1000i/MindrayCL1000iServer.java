@@ -7,6 +7,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.net.SocketTimeoutException;
 import java.text.SimpleDateFormat;
 import java.util.Arrays;
 import java.util.Date;
@@ -63,18 +64,12 @@ public class MindrayCL1000iServer {
 
     private static ServerSocket serverSocket;
     private static int port; // Port needs to be static for restart
-    
-    int maxUnexpectedDataLimit=1000;
-    int unexpectedDataCount=0;
 
-    
-    
-    
-    
-    
-    
-   public void start(int port) {
-       port = SettingsLoader.getSettings().getAnalyzerDetails().getAnalyzerPort();
+    int maxUnexpectedDataLimit = 1000;
+    int unexpectedDataCount = 0;
+
+    public void start(int port) {
+        port = SettingsLoader.getSettings().getAnalyzerDetails().getAnalyzerPort();
 //        IndikoServer.port = port;  // Assign port to static variable for restart
         try {
             serverSocket = new ServerSocket(port);
@@ -82,7 +77,10 @@ public class MindrayCL1000iServer {
             while (true) {
                 try (Socket clientSocket = serverSocket.accept()) {
                     logger.info("New client connected: " + clientSocket.getInetAddress().getHostAddress());
-                    handleClient(clientSocket);
+
+//                    handleClient(clientSocket);
+                    handleClientTest1(clientSocket);
+
                 } catch (IOException e) {
                     logger.error("Error handling client connection", e);
                 }
@@ -124,79 +122,133 @@ public class MindrayCL1000iServer {
         }
     }
 
-    private void handleClient(Socket clientSocket) {
-        try (InputStream in = new BufferedInputStream(clientSocket.getInputStream()); OutputStream out = new BufferedOutputStream(clientSocket.getOutputStream())) {
-            StringBuilder asciiDebugInfo = new StringBuilder();
+    private void handleClientTest1(Socket clientSocket) {
+        String clientAddress = clientSocket.getInetAddress().getHostAddress();
+        logger.info("Handling new client connection from: " + clientAddress);
+
+        try (InputStream in = new BufferedInputStream(clientSocket.getInputStream())) {
+            clientSocket.setSoTimeout(55000);
+            logger.info("Socket timeout set to 55000ms for client: " + clientAddress);
+
             boolean sessionActive = true;
-            boolean inChecksum = false;
-            int checksumCount = 0;
+            boolean receivedData = false; // Track if any data was received
 
             while (sessionActive) {
-                int data = in.read();
-
-                if (inChecksum) {
-                    asciiDebugInfo.append((char) data).append(" (").append(data).append(") ");  // Append character and its ASCII value
-                    checksumCount++;
-                    if (checksumCount == 4) {
-                        inChecksum = false;
-                        checksumCount = 0;
-                        asciiDebugInfo.setLength(0);  // Clear the StringBuilder for the next use
+                try {
+                    int data = in.read();
+                    if (data == -1) {
+                        logger.warn("Client {} cleanly closed the connection.", clientAddress);
+                        sessionActive = false;
+                    } else {
+                        // Log at INFO level to ensure visibility
+                        logger.info("Received byte: 0x{} ({}) | ASCII: {}",
+                                Integer.toHexString(data).toUpperCase(),
+                                data,
+                                (data >= 32 && data <= 126) ? (char) data : "[non-printable]");
+                        receivedData = true;
                     }
-                    continue;
+                } catch (SocketTimeoutException e) {
+                    logger.warn("Socket timeout for client {}. No data received in 55s.", clientAddress);
+                    sessionActive = false;
+                } catch (IOException e) {
+                    // Differentiate between connection resets and other errors
+                    if (e.getMessage().contains("Connection reset")) {
+                        logger.warn("Client {} forcibly closed the connection. Received data before error: {}",
+                                clientAddress, receivedData ? "YES" : "NO");
+                    } else {
+                        logger.error("I/O error with client {}: {}", clientAddress, e.getMessage(), e);
+                    }
+                    sessionActive = false;
+                }
+            }
+        } catch (IOException e) {
+            logger.error("General I/O error for client {}: {}", clientAddress, e.getMessage(), e);
+        } finally {
+            try {
+                clientSocket.close();
+                logger.info("Closed connection with client: {}", clientAddress);
+            } catch (IOException e) {
+                logger.error("Error closing socket for client {}: {}", clientAddress, e.getMessage());
+            }
+        }
+    }
+
+    private void handleClient(Socket clientSocket) {
+        logger.info("Handling new client connection from: " + clientSocket.getInetAddress().getHostAddress());
+
+        try (InputStream in = new BufferedInputStream(clientSocket.getInputStream()); OutputStream out = new BufferedOutputStream(clientSocket.getOutputStream())) {
+
+            clientSocket.setSoTimeout(5000); // Set 5-second timeout
+            logger.info("Socket timeout set to 5000ms");
+
+            boolean sessionActive = true;
+            while (sessionActive) {
+                int data;
+                try {
+                    data = in.read(); // Read next byte
+                    if (data == -1) {
+                        logger.warn("End of stream reached. Client may have disconnected unexpectedly.");
+                        sessionActive = false;
+                        break;
+                    }
+                    logger.debug("Received byte: " + data + " (ASCII: " + (char) data + ")");
+                } catch (IOException e) {
+                    logger.error("IOException while reading from socket. Client may have disconnected.", e);
+                    break;
                 }
 
                 switch (data) {
                     case ENQ:
-//                        logger.debug("Received ENQ");
+                        logger.info("Received ENQ from client.");
                         out.write(ACK);
                         out.flush();
-//                        logger.debug("Sent ACK");
+                        logger.info("Sent ACK in response to ENQ.");
                         break;
+
                     case ACK:
-//                        logger.debug("ACK Received.");
+                        logger.info("Received ACK from client.");
                         handleAck(clientSocket, out);
                         break;
-                    case STX:
-                        inChecksum = true;
-                        StringBuilder message = new StringBuilder();
-                        asciiDebugInfo = new StringBuilder();  // To store ASCII values for debugging
 
+                    case STX:
+                        logger.info("Received STX, waiting for message...");
+                        StringBuilder message = new StringBuilder();
                         while ((data = in.read()) != ETX) {
                             if (data == -1) {
+                                logger.error("Unexpected end of stream while reading message.");
+                                sessionActive = false;
                                 break;
                             }
                             message.append((char) data);
-                            asciiDebugInfo.append("[").append(data).append("] ");  // Append ASCII value in brackets
                         }
-                        logger.debug("Message received: " + message);
+
+                        logger.info("Complete message received: " + message);
                         processMessage(message.toString(), clientSocket);
                         out.write(ACK);
                         out.flush();
-//                        logger.debug("Sent ACK after STX-ETX block");
+                        logger.info("Sent ACK after processing message.");
                         break;
+
                     case EOT:
-//                        logger.debug("EOT Received");
+                        logger.info("Received EOT (End of Transmission). Closing session.");
                         handleEot(out);
+                        sessionActive = false;
                         break;
+
                     default:
-                       if (data == -1) {
-                        unexpectedDataCount++;
-                        logger.debug("Received unexpected data: " + (char) data + " (ASCII: " + data + ")");
-                        if (unexpectedDataCount >= maxUnexpectedDataLimit) {
-                            logger.error("Too many unexpected data received, closing connection and restarting the server.");
-                            sessionActive = false;
-                            clientSocket.close();
-                            restartServer();
-                            return;
-                        }
-                    } else {
-                        unexpectedDataCount = 0;  // Reset count on valid data
-                    }
-                    break;
+                        logger.warn("Unexpected byte received: " + data + " (ASCII: " + (char) data + ")");
+                        break;
                 }
             }
         } catch (IOException e) {
-            logger.error("Error during client communication", e);
+            logger.error("IOException in client communication loop.", e);
+        } finally {
+            logger.info("Client session ended.");
+            try {
+                clientSocket.close();
+            } catch (IOException e) {
+                logger.error("Error closing client socket.", e);
+            }
         }
     }
 

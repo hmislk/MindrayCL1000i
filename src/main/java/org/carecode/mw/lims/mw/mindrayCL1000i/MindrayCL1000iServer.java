@@ -49,11 +49,12 @@ public class MindrayCL1000iServer {
     boolean needToSendPatientRecordForQuery;
     boolean needToSendOrderingRecordForQuery;
     boolean needToSendEotForRecordForQuery;
+    boolean needToSendFinalEot;  // set after empty H+L frame, signals next ACK should send EOT
 
     private DataBundle patientDataBundle = new DataBundle();
 
     String patientId;
-    static String sampleId;
+    String sampleId;
     List<String> testNames;
     int frameNumber;
     char terminationCode = 'N';
@@ -68,6 +69,14 @@ public class MindrayCL1000iServer {
     int maxUnexpectedDataLimit = 1000;
     int unexpectedDataCount = 0;
 
+    private static String safeField(String[] fields, int index) {
+        return index < fields.length ? fields[index] : "";
+    }
+
+    private static String safeComponent(String[] components, int index) {
+        return index < components.length ? components[index] : "";
+    }
+
     public void start(int port) {
         port = SettingsLoader.getSettings().getAnalyzerDetails().getAnalyzerPort();
 //        IndikoServer.port = port;  // Assign port to static variable for restart
@@ -78,8 +87,8 @@ public class MindrayCL1000iServer {
                 try (Socket clientSocket = serverSocket.accept()) {
                     logger.info("New client connected: " + clientSocket.getInetAddress().getHostAddress());
 
-//                    handleClient(clientSocket);
-                    handleClientTest1(clientSocket);
+                    handleClient(clientSocket);
+//                    handleClientTest1(clientSocket);
 
                 } catch (IOException e) {
                     logger.error("Error handling client connection", e);
@@ -178,8 +187,15 @@ public class MindrayCL1000iServer {
 
         try (InputStream in = new BufferedInputStream(clientSocket.getInputStream()); OutputStream out = new BufferedOutputStream(clientSocket.getOutputStream())) {
 
-            clientSocket.setSoTimeout(5000); // Set 5-second timeout
-            logger.info("Socket timeout set to 5000ms");
+            clientSocket.setSoTimeout(30000); // 30s inter-frame timeout per ASTM spec
+            logger.info("Socket timeout set to 30000ms");
+
+            // CL-1000i waits for the host to initiate — send ENQ as a greeting.
+            // handleAck() will send EOT immediately if no orders are pending,
+            // putting both sides into neutral mode and keeping the connection alive.
+            out.write(ENQ);
+            out.flush();
+            logger.info("Sent ENQ greeting to analyzer on connect.");
 
             boolean sessionActive = true;
             while (sessionActive) {
@@ -191,7 +207,9 @@ public class MindrayCL1000iServer {
                         sessionActive = false;
                         break;
                     }
-                    logger.debug("Received byte: " + data + " (ASCII: " + (char) data + ")");
+                    logger.info("Received byte: 0x{} ({}) | ASCII: {}",
+                            String.format("%02X", data), data,
+                            (data >= 32 && data <= 126) ? String.valueOf((char) data) : "[ctrl]");
                 } catch (IOException e) {
                     logger.error("IOException while reading from socket. Client may have disconnected.", e);
                     break;
@@ -213,7 +231,7 @@ public class MindrayCL1000iServer {
                     case STX:
                         logger.info("Received STX, waiting for message...");
                         StringBuilder message = new StringBuilder();
-                        while ((data = in.read()) != ETX) {
+                        while ((data = in.read()) != ETX && data != 0x17 /* ETB */) {
                             if (data == -1) {
                                 logger.error("Unexpected end of stream while reading message.");
                                 sessionActive = false;
@@ -221,6 +239,8 @@ public class MindrayCL1000iServer {
                             }
                             message.append((char) data);
                         }
+                        // Consume checksum (2 bytes) + CR + LF that follow ETX/ETB
+                        in.read(); in.read(); in.read(); in.read();
 
                         logger.info("Complete message received: " + message);
                         processMessage(message.toString(), clientSocket);
@@ -230,9 +250,12 @@ public class MindrayCL1000iServer {
                         break;
 
                     case EOT:
-                        logger.info("Received EOT (End of Transmission). Closing session.");
+                        logger.info("Received EOT (End of Transmission).");
                         handleEot(out);
-                        sessionActive = false;
+                        // Keep session open if we sent ENQ in handleEot and are waiting for ACK.
+                        if (!respondingQuery) {
+                            sessionActive = false;
+                        }
                         break;
 
                     default:
@@ -297,10 +320,23 @@ public class MindrayCL1000iServer {
             receivingResults = false;
             respondingQuery = false;
             respondingResults = false;
-        } else {
+        } else if (needToSendFinalEot) {
+            // Instrument ACKed our empty H+L frame — now close the transmission
             out.write(EOT);
             out.flush();
-            logger.debug("Sent EOT");
+            needToSendFinalEot = false;
+            logger.info("Sent EOT after empty H+L handshake — connection now in neutral mode.");
+        } else {
+            // No pending orders: send a minimal H+L frame so the analyzer accepts the session
+            // and enters neutral mode rather than resetting the connection.
+            frameNumber = 1;
+            String emptyContent = createLimsHeaderRecord() + CR + createLimsTerminationRecord(frameNumber, 'N');
+            String emptyFrame = buildASTMMessage(emptyContent);
+            OutputStream sessionOut = new BufferedOutputStream(clientSocket.getOutputStream());
+            sessionOut.write(emptyFrame.getBytes());
+            sessionOut.flush();
+            needToSendFinalEot = true;
+            logger.info("Sent empty H+L frame — awaiting ACK before EOT.");
         }
     }
 
@@ -477,28 +513,28 @@ public class MindrayCL1000iServer {
                 + sequenceNumber + delimiter
                 + sampleID + delimiter
                 + instrumentSpecimenID + delimiter
-                + orderedTests + delimiter;
-//                + specimenType + delimiter
-//                + fillField + delimiter
-//                + dateTimeOfCollection + delimiter
-//                + priority + delimiter
-//                
-//                + physicianID + delimiter
-//                + physicianName + delimiter
-//                + userFieldNo1 + delimiter
-//                + userFieldNo2 + delimiter
-//                + labFieldNo1 + delimiter
-//                + labFieldNo2 + delimiter
-//                + dateTimeSpecimenReceived + delimiter
-//                + specimenDescriptor + delimiter
-//                + orderingMD + delimiter
-//                + locationDescription + delimiter
-//                + ward + delimiter
-//                + invoiceNumber + delimiter
-//                + reportType + delimiter
-//                + reservedField1 + delimiter
-//                + reservedField2 + delimiter
-//                + transportInformation;
+                + orderedTests + delimiter
+                + specimenType + delimiter
+                + fillField + delimiter
+                + dateTimeOfCollection + delimiter
+                + priority + delimiter
+                + delimiter
+                + physicianID + delimiter
+                + physicianName + delimiter
+                + userFieldNo1 + delimiter
+                + userFieldNo2 + delimiter
+                + labFieldNo1 + delimiter
+                + labFieldNo2 + delimiter
+                + dateTimeSpecimenReceived + delimiter
+                + specimenDescriptor + delimiter
+                + orderingMD + delimiter
+                + locationDescription + delimiter
+                + ward + delimiter
+                + invoiceNumber + delimiter
+                + reportType + delimiter
+                + reservedField1 + delimiter
+                + reservedField2 + delimiter
+                + transportInformation;
     }
 
     public String createLimsHeaderRecord() {
@@ -516,15 +552,10 @@ public class MindrayCL1000iServer {
         String hr9 = "";
         String hr10 = "";
         String hr11 = "";
-        String hr12 = "P";
-        String hr13 = "";
-        String hr14 = "20240508221500";
-        String header = hr1 + hr2 + fieldD + hr3 + fieldD + hr4 + fieldD + hr5 + fieldD + hr6 + fieldD + hr7 + fieldD + hr8 + fieldD + hr9 + fieldD + hr10 + fieldD + hr11 + fieldD + hr12 + fieldD + hr13 + fieldD + hr14;
-
-        header = hr1 + hr2 + fieldD + hr3 + fieldD + hr4 + fieldD + hr5 + fieldD + hr6 + fieldD + hr7 + fieldD + hr8 + fieldD + hr9 + fieldD + hr10 + fieldD + hr11 + fieldD + hr12;
-
-        return header;
-
+        String hr12 = "SA";
+        String hr13 = "1394-97";
+        String hr14 = new SimpleDateFormat("yyyyMMddHHmmss").format(new Date());
+        return hr1 + hr2 + fieldD + hr3 + fieldD + hr4 + fieldD + hr5 + fieldD + hr6 + fieldD + hr7 + fieldD + hr8 + fieldD + hr9 + fieldD + hr10 + fieldD + hr11 + fieldD + hr12 + fieldD + hr13 + fieldD + hr14;
     }
 
     public String createLimsOrderRecord(OrderRecord order) {
@@ -539,89 +570,98 @@ public class MindrayCL1000iServer {
     }
 
     private void processMessage(String data, Socket clientSocket) {
-
-        if (data.length() >= 3 && Character.isDigit(data.charAt(0)) && data.charAt(2) == '|') {
-            char recordType = data.charAt(1);
-
-            switch (recordType) {
-                case 'H': // Header Record
-                    patientDataBundle = new DataBundle();
-                    receivingQuery = false;
-                    receivingResults = false;
-                    respondingQuery = false;
-                    respondingResults = false;
-                    needToSendEotForRecordForQuery = false;
-                    needToSendOrderingRecordForQuery = false;
-                    needToSendPatientRecordForQuery = false;
-                    needToSendHeaderRecordForQuery = false;
-                    logger.debug("Header Record Received: " + data);
-                    break;
-                case 'R': // Result Record
-                    logger.debug("Result Record Received: " + data);
-                    respondingResults = true;
-                    respondingQuery = false;
-                    resultRecord = parseResultsRecord(data);
-                    getPatientDataBundle().getResultsRecords().add(resultRecord);
-                    logger.debug("Result Record Parsed: " + resultRecord);
-                    break;
-                case 'Q': // Query Record
-                    System.out.println("Query result received" + data);
-                    receivingQuery = false;
-
-                    respondingQuery = true;
-                    needToSendHeaderRecordForQuery = true;
-                    logger.debug("Query Record Received: " + data);
-                    queryRecord = parseQueryRecord(data);
-                    getPatientDataBundle().getQueryRecords().add(queryRecord);
-                    logger.debug("Parsed the Query Record: " + queryRecord);
-                    break;
-                case 'P': // Patient Record
-                    logger.debug("Patient Record Received: " + data);
-                    patientRecord = parsePatientRecord(data);
-                    getPatientDataBundle().setPatientRecord(patientRecord);
-                    logger.debug("Patient Record Parsed: " + patientRecord);
-                    break;
-                case 'L': // Termination Record
-                    logger.debug("Termination Record Received: " + data);
-                    break;
-                case 'C': // Comment Record
-                    logger.debug("Comment Record Received: " + data);
-
-                    break;
-                case 'O': // Order Record or other type represented by 'O'
-                    System.out.println("Order result received" + data);
-                    logger.debug("Query Record Received: " + data);
-                    String tmpSampleId = extractSampleIdFromOrderRecord(data);
-                    System.out.println("tmpSampleId = " + tmpSampleId);
-                    sampleId = tmpSampleId;
-                    QueryRecord qr = new QueryRecord(0, sampleId, sampleId, "");
-                    getPatientDataBundle().getQueryRecords().add(qr);
-//                    OrderRecord orderRecord = new OrderRecord(2, sampleId, null, sampleId, "", "");
-//                    getPatientDataBundle().getOrderRecords().add(orderRecord);
-                    logger.debug("Parsed the Query Record: " + queryRecord);
-                    break;
-                default: // Unknown Record
-                    logger.debug("Unknown Record Received: " + data);
-                    break;
+        // A single ASTM frame may contain multiple CR-separated records (e.g., H, P, O, R, L).
+        // Split and process each record individually.
+        String[] records = data.split("\r");
+        for (String record : records) {
+            record = record.trim();
+            if (!record.isEmpty()) {
+                processSingleRecord(record, clientSocket);
             }
-        } else {
-            logger.debug("Invalid Record Structure: " + data);
+        }
+    }
+
+    private void processSingleRecord(String data, Socket clientSocket) {
+        if (data.length() < 2) {
+            logger.debug("Record too short to parse: " + data);
+            return;
+        }
+
+        // Records may begin with a frame-number digit (e.g. "1H|...") or directly with
+        // the record-type letter (e.g. "P|...", "R|...") when part of a multi-record frame.
+        char recordType = Character.isDigit(data.charAt(0)) ? data.charAt(1) : data.charAt(0);
+
+        switch (recordType) {
+            case 'H': // Header Record
+                patientDataBundle = new DataBundle();
+                receivingQuery = false;
+                receivingResults = false;
+                respondingQuery = false;
+                respondingResults = false;
+                needToSendEotForRecordForQuery = false;
+                needToSendOrderingRecordForQuery = false;
+                needToSendPatientRecordForQuery = false;
+                needToSendHeaderRecordForQuery = false;
+                logger.debug("Header Record Received: " + data);
+                break;
+            case 'R': // Result Record
+                logger.debug("Result Record Received: " + data);
+                respondingResults = true;
+                respondingQuery = false;
+                resultRecord = parseResultsRecord(data);
+                if (resultRecord != null) {
+                    getPatientDataBundle().getResultsRecords().add(resultRecord);
+                }
+                logger.debug("Result Record Parsed: " + resultRecord);
+                break;
+            case 'Q': // Query Record
+                logger.info("Query record received: " + data);
+                receivingQuery = false;
+                respondingQuery = true;
+                needToSendHeaderRecordForQuery = true;
+                logger.debug("Query Record Received: " + data);
+                queryRecord = parseQueryRecord(data);
+                getPatientDataBundle().getQueryRecords().add(queryRecord);
+                logger.debug("Parsed the Query Record: " + queryRecord);
+                break;
+            case 'P': // Patient Record
+                logger.debug("Patient Record Received: " + data);
+                patientRecord = parsePatientRecord(data);
+                getPatientDataBundle().setPatientRecord(patientRecord);
+                logger.debug("Patient Record Parsed: " + patientRecord);
+                break;
+            case 'L': // Termination Record
+                logger.debug("Termination Record Received: " + data);
+                break;
+            case 'C': // Comment Record
+                logger.debug("Comment Record Received: " + data);
+                break;
+            case 'O': // Order Record
+                logger.info("Order record received: " + data);
+                String tmpSampleId = extractSampleIdFromOrderRecord(data);
+                logger.info("Sample ID from O record: " + tmpSampleId);
+                sampleId = tmpSampleId;
+                break;
+            default: // Unknown Record
+                logger.debug("Unknown Record Received: " + data);
+                break;
         }
     }
 
     public static PatientRecord parsePatientRecord(String patientSegment) {
         String[] fields = patientSegment.split("\\|");
-        int frameNumber = Integer.parseInt(fields[0].replaceAll("[^0-9]", ""));
-        String patientId = fields[1];
-        String additionalId = fields[3]; // assuming index 2 is always empty as per your example
-        String patientName = fields[4];
-        String patientSecondName = fields[6]; // assuming this follows the same unused pattern
-        String patientSex = fields[7];
-        String race = ""; // Not available in the segment
-        String dob = ""; // Date of birth, not available in the segment
-        String patientAddress = fields[11];
-        String patientPhoneNumber = fields[14];
-        String attendingDoctor = fields[15];
+        String fnStr = fields[0].replaceAll("[^0-9]", "");
+        int frameNumber = fnStr.isEmpty() ? 0 : Integer.parseInt(fnStr);
+        String patientId = safeField(fields, 1);
+        String additionalId = safeField(fields, 3);
+        String patientName = safeField(fields, 4);
+        String patientSecondName = safeField(fields, 6);
+        String patientSex = safeField(fields, 7);
+        String race = "";
+        String dob = safeField(fields, 7);
+        String patientAddress = safeField(fields, 11);
+        String patientPhoneNumber = safeField(fields, 14);
+        String attendingDoctor = safeField(fields, 15);
 
         // Return a new PatientRecord object using the extracted data
         return new PatientRecord(
@@ -639,43 +679,42 @@ public class MindrayCL1000iServer {
         );
     }
 
-    public static ResultsRecord parseResultsRecord(String resultSegment) {
+    public ResultsRecord parseResultsRecord(String resultSegment) {
         // Split the segment into fields
         String[] fields = resultSegment.split("\\|");
 
-        // Ensure that the fields array has the expected length
-        if (fields.length < 6) {
+        // R record needs at least: frame+type, seq, testId, value, units
+        if (fields.length < 5) {
             logger.error("Insufficient fields in the result segment: {}", resultSegment);
-            return null; // or throw an exception
+            return null;
         }
 
         // Extract the frame number by removing non-numeric characters
-        int frameNumber = Integer.parseInt(fields[0].replaceAll("[^0-9]", ""));
+        String fnStr = fields[0].replaceAll("[^0-9]", "");
+        int frameNumber = fnStr.isEmpty() ? 0 : Integer.parseInt(fnStr);
         logger.debug("Frame number extracted: {}", frameNumber);
 
-        // Test code should be correctly identified assuming it's provided correctly in the fields[1]
-        String testCode = fields[2].split("\\^")[3]; // Extracting the correct part of the test code
+        // ASTM R field 3: channel^testName^^resultFlag — index 1 is the test name
+        String[] testIdComponents = fields[2].split("\\^");
+        String testCode = safeComponent(testIdComponents, 1);
         logger.debug("Test code extracted: {}", testCode);
 
-        // Result value parsing assumes the result is in the fourth field
-        double resultValue = 0.0;
-        String resultValueString = fields[3];
+        // Result value parsing — field 4. ASTM uses ^ as component separator within the field
+        // (e.g. "13.184^^^^"), so take only the first component.
+        String resultValueString = safeField(fields, 3).split("\\^")[0];
 
-        try {
-            resultValue = Double.parseDouble(fields[3]);
-            logger.debug("Result value extracted: {}", resultValue);
-        } catch (NumberFormatException e) {
-            logger.error("Failed to parse result value from segment: {}", resultSegment, e);
-        }
-
-        // Units and other details
-        String resultUnits = fields[4];
+        // ASTM R field 5 = units, field 13 = observation datetime, field 14 = producer/instrument
+        String resultUnits = safeField(fields, 4);
         logger.debug("Result units extracted: {}", resultUnits);
-        String resultDateTime = fields[12];
+        // Fields are 1-based in the spec but 0-based in the split array; frame+type occupies index 0.
+        // Layout: [0]=frameType [1]=seq [2]=testId [3]=value [4]=units [5]=refRange [6]=abnFlags
+        //         [7]=prob [8]=resultStatus [9]=origResult [10]=rerunFlag [11]=obsDateTime
+        //         [12]=producerID [13]=instrument
+        String resultDateTime = safeField(fields, 11);
         logger.debug("Result date-time extracted: {}", resultDateTime);
-        String instrumentName = fields[13];
+        String instrumentName = safeField(fields, 13).split("\\^")[0];
         logger.debug("Instrument name extracted: {}", instrumentName);
-        System.out.println("sampleId = " + sampleId);
+        logger.debug("sampleId = {}", sampleId);
         // Return a new ResultsRecord object initialized with extracted values
         return new ResultsRecord(
                 frameNumber,
@@ -694,7 +733,8 @@ public class MindrayCL1000iServer {
         String[] fields = orderSegment.split("\\|");
 
         // Extract frame number and remove non-numeric characters (<STX>, etc.)
-        int frameNumber = Integer.parseInt(fields[0].replaceAll("[^0-9]", ""));
+        String fnStr = fields[0].replaceAll("[^0-9]", "");
+        int frameNumber = fnStr.isEmpty() ? 0 : Integer.parseInt(fnStr);
 
         // Sample ID and associated data
         String[] sampleDetails = fields[1].split("\\^");
@@ -765,7 +805,7 @@ public class MindrayCL1000iServer {
         }
     }
 
-    public static QueryRecord parseQueryRecord(String querySegment) {
+    public QueryRecord parseQueryRecord(String querySegment) {
         System.out.println("querySegment = " + querySegment);
         String tmpSampleId = extractSampleIdFromQueryRecord(querySegment);
         System.out.println("tmpSampleId = " + tmpSampleId);

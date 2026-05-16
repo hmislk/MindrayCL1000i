@@ -1,0 +1,31 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -c \"import pdfplumber; print\\('pdfplumber ok'\\)\")",
+      "Bash(python3 -c \"import pymupdf; print\\('pymupdf ok'\\)\")",
+      "Bash(python3 -c \"import fitz; print\\('fitz ok'\\)\")",
+      "Bash(where python *)",
+      "Bash(where python3 *)",
+      "Bash(where py *)",
+      "Bash(python *)",
+      "Bash(where mvn *)",
+      "Bash(mvn clean *)",
+      "Bash(java -jar target\\\\mindrayCL1000i-1.0.jar)",
+      "Bash(java *)",
+      "Bash(taskkill *)",
+      "PowerShell(Stop-Process *)",
+      "Bash(cd /d D:/mindrayCL1000i_OLD)",
+      "Bash(mvn package *)",
+      "Bash(mvn -f \"D:/mindrayCL1000i_OLD/pom.xml\" package -q)",
+      "Bash(pkill -f \"mindrayCL1000i-1.0.jar\")",
+      "Bash(java -jar \"D:/mindrayCL1000i_OLD/target/mindrayCL1000i-1.0.jar\")",
+      "Bash(echo \"Started PID $!\")",
+      "Bash(pkill -9 java)",
+      "Bash(netstat -tlnp)",
+      "PowerShell(Get-Process *)",
+      "PowerShell(Start-Process -FilePath \"java\" -ArgumentList \"-jar\", \"D:\\\\mindrayCL1000i_OLD\\\\target\\\\mindrayCL1000i-1.0.jar\" -RedirectStandardOutput \"D:\\\\mindrayCL1000i_OLD\\\\logs\\\\mw_new.log\" -RedirectStandardError \"D:\\\\mindrayCL1000i_OLD\\\\logs\\\\mw_new_err.log\" -NoNewWindow; Start-Sleep -Seconds 3; Get-Content \"D:\\\\mindrayCL1000i_OLD\\\\logs\\\\mw_new.log\" -Tail 15; Get-Content \"D:\\\\mindrayCL1000i_OLD\\\\logs\\\\mw_new_err.log\" -Tail 5)",
+      "PowerShell(mvn *)",
+      "PowerShell(Get-Content *)"
+    ]
+  }
+}

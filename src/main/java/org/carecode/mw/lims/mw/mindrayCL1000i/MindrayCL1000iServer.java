@@ -211,7 +211,11 @@ public class MindrayCL1000iServer {
                             String.format("%02X", data), data,
                             (data >= 32 && data <= 126) ? String.valueOf((char) data) : "[ctrl]");
                 } catch (IOException e) {
-                    logger.error("IOException while reading from socket. Client may have disconnected.", e);
+                    if (e.getMessage() != null && e.getMessage().contains("Connection reset")) {
+                        logger.info("Connection reset by analyzer — session ended normally.");
+                    } else {
+                        logger.error("IOException while reading from socket. Client may have disconnected.", e);
+                    }
                     break;
                 }
 
@@ -362,7 +366,9 @@ public class MindrayCL1000iServer {
             out.flush();
             logger.debug("Sent ENQ");
         } else if (respondingResults) {
-            LISCommunicator.pushResults(patientDataBundle);
+            final DataBundle bundleToSend = patientDataBundle;
+            respondingResults = false;
+            new Thread(() -> LISCommunicator.pushResults(bundleToSend), "lis-push").start();
         } else {
             logger.debug("Received EOT, ending session");
         }
@@ -715,8 +721,7 @@ public class MindrayCL1000iServer {
         String instrumentName = safeField(fields, 13).split("\\^")[0];
         logger.debug("Instrument name extracted: {}", instrumentName);
         logger.debug("sampleId = {}", sampleId);
-        // Return a new ResultsRecord object initialized with extracted values
-        return new ResultsRecord(
+        ResultsRecord record = new ResultsRecord(
                 frameNumber,
                 testCode,
                 resultValueString,
@@ -725,6 +730,12 @@ public class MindrayCL1000iServer {
                 instrumentName,
                 sampleId
         );
+        try {
+            record.setResultValue(Double.parseDouble(resultValueString));
+        } catch (NumberFormatException e) {
+            logger.warn("Could not parse result value '{}' as double — resultValue left as 0.0", resultValueString);
+        }
+        return record;
 
     }
 

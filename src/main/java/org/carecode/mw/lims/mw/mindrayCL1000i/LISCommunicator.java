@@ -24,147 +24,124 @@ public class LISCommunicator {
     private static final Gson gson = new Gson();
 
     public static DataBundle pullTestOrdersForSampleRequests(QueryRecord queryRecord) {
-        System.out.println("pullTestOrdersForSampleRequests");
-//        if (testing) {
-//            PatientDataBundle pdb = new PatientDataBundle();
-//            List<String> testNames = Arrays.asList("HDL", "RF2");
-//            OrderRecord or = new OrderRecord(0, queryRecord.getSampleId(), testNames, "S", new Date(), "testInformation");
-//            pdb.getOrderRecords().add(or);
-//            PatientRecord pr = new PatientRecord(0, "1010101", "111111", "Buddhika Ariyaratne", "M H B", "Male", "Sinhalese", null, "Galle", "0715812399", "Dr Niluka");
-//            pdb.setPatientRecord(pr);
-//            return pdb;
-//        }
-
+        logger.info("pullTestOrdersForSampleRequests — sampleId={}", queryRecord.getSampleId());
         try {
-            String postSampleDataEndpoint = SettingsLoader.getSettings().getLimsSettings().getLimsServerBaseUrl();
-            System.out.println("postSampleDataEndpoint = " + postSampleDataEndpoint);
-            URL url = new URL(postSampleDataEndpoint + "/test_orders_for_sample_requests");
-            System.out.println("url = " + url);
+            String endpoint = SettingsLoader.getSettings().getLimsSettings().getLimsServerBaseUrl() + "/test_orders_for_sample_requests";
+            logger.info("Querying LIS for orders: {}", endpoint);
+            URL url = new URL(endpoint);
             HttpURLConnection conn = (HttpURLConnection) url.openConnection();
             conn.setRequestMethod("POST");
             conn.setRequestProperty("Content-Type", "application/json");
             conn.setRequestProperty("Accept", "application/json");
             conn.setDoOutput(true);
-            System.out.println("queryRecord = " + queryRecord);
-            // Convert QueryRecord to JSON
 
             DataBundle databundle = new DataBundle();
             databundle.setMiddlewareSettings(SettingsLoader.getSettings());
             databundle.getQueryRecords().add(queryRecord);
             String jsonInputString = gson.toJson(databundle);
-            System.out.println("jsonInputString = " + jsonInputString);
-            // Send the request
+            logger.debug("Order query payload: {}", jsonInputString);
+
             try (OutputStream os = conn.getOutputStream()) {
                 byte[] input = jsonInputString.getBytes("utf-8");
                 os.write(input, 0, input.length);
             }
 
             int responseCode = conn.getResponseCode();
-            System.out.println("responseCode = " + responseCode);
+            logger.info("LIS order query response code: {}", responseCode);
+
             if (responseCode == HttpURLConnection.HTTP_OK) {
-                System.out.println("OK responseCode = " + responseCode);
-                // Process response
                 BufferedReader in = new BufferedReader(new InputStreamReader(conn.getInputStream(), "utf-8"));
                 StringBuilder response = new StringBuilder();
                 String inputLine;
-
                 while ((inputLine = in.readLine()) != null) {
                     response.append(inputLine);
                 }
                 in.close();
-                System.out.println("response.toString() = " + response.toString());
-                // Convert the response to a PatientDataBundle object
+                logger.debug("LIS order query response body: {}", response);
                 DataBundle patientDataBundle = gson.fromJson(response.toString(), DataBundle.class);
-                System.out.println("patientDataBundle = " + patientDataBundle);
+                logger.info("Orders received from LIS: {}", patientDataBundle);
                 return patientDataBundle;
             } else {
-                System.out.println("POST request failed. Response code: " + responseCode);
+                BufferedReader errReader = new BufferedReader(new InputStreamReader(conn.getErrorStream(), "utf-8"));
+                StringBuilder errBody = new StringBuilder();
+                String line;
+                while ((line = errReader.readLine()) != null) {
+                    errBody.append(line);
+                }
+                errReader.close();
+                logger.error("LIS order query FAILED — responseCode={}, body={}", responseCode, errBody);
             }
         } catch (Exception e) {
-            e.printStackTrace();
+            logger.error("Exception while querying orders from LIS", e);
         }
-
         return null;
     }
 
     public static void pushResults(DataBundle patientDataBundle) {
-        System.out.println("pushResults = ");
+        logger.info("pushResults called");
         try {
-            System.out.println("SettingsLoader.getSettings() = " + SettingsLoader.getSettings());
-            System.out.println("SettingsLoader.getSettings().getLimsSettings() = " + SettingsLoader.getSettings().getLimsSettings());
-            System.out.println("SettingsLoader.getSettings().getLimsSettings().getLimsServerBaseUrl() = " + SettingsLoader.getSettings().getLimsSettings().getLimsServerBaseUrl());
             String pushResultsEndpoint = SettingsLoader.getSettings().getLimsSettings().getLimsServerBaseUrl() + "/test_results";
+            logger.info("Pushing results to: {}", pushResultsEndpoint);
 
-            
-            for(ResultsRecord rr:patientDataBundle.getResultsRecords()){
-                System.out.println("rr value  = " + rr.getResultValue() + "");
-                System.out.println("rr value string = " + rr.getResultValueString());
+            for (ResultsRecord rr : patientDataBundle.getResultsRecords()) {
+                logger.info("Result to push — sampleId={}, testCode={}, value={}, valueString={}",
+                        rr.getSampleId(), rr.getTestCode(), rr.getResultValue(), rr.getResultValueString());
             }
-            
-            
+
             URL url = new URL(pushResultsEndpoint);
-            System.out.println("url = " + url);
             HttpURLConnection conn = (HttpURLConnection) url.openConnection();
             conn.setRequestMethod("POST");
             conn.setRequestProperty("Content-Type", "application/json");
             conn.setRequestProperty("Accept", "application/json");
             conn.setDoOutput(true);
-            // Serialize PatientDataBundle to JSON
             patientDataBundle.setMiddlewareSettings(SettingsLoader.getSettings());
             String jsonInputString = gson.toJson(patientDataBundle);
-            System.out.println("jsonInputString = " + jsonInputString);
-            // Send the JSON in the request body
+            logger.info("Sending JSON payload: {}", jsonInputString);
+
             try (OutputStream os = conn.getOutputStream()) {
                 byte[] input = jsonInputString.getBytes("utf-8");
                 os.write(input, 0, input.length);
             }
 
             int responseCode = conn.getResponseCode();
-            System.out.println("responseCode = " + responseCode);
+            logger.info("LIS response code: {}", responseCode);
+
             if (responseCode == HttpURLConnection.HTTP_OK) {
-                System.out.println("ok");
                 BufferedReader in = new BufferedReader(new InputStreamReader(conn.getInputStream(), "utf-8"));
                 StringBuilder response = new StringBuilder();
                 String inputLine;
-
                 while ((inputLine = in.readLine()) != null) {
                     response.append(inputLine);
                 }
                 in.close();
+                logger.info("LIS response body: {}", response);
 
-                System.out.println("response.toString() = " + response.toString());
-
-                // Optionally process the server response (if needed)
                 JsonObject responseObject = JsonParser.parseString(response.toString()).getAsJsonObject();
-                MindrayCL1000i.logger.info("Response from server: " + responseObject.toString());
-
-// Extract status
                 String status = responseObject.get("status").getAsString();
-                MindrayCL1000i.logger.info("Status: " + status);
+                logger.info("LIS status: {}", status);
 
-// Extract the list of ResultsRecord objects
                 Gson gson = new Gson();
                 JsonArray detailsArray = responseObject.getAsJsonArray("details");
-
-// Deserialize the JSON array into a list of ResultsRecord objects
                 List<ResultsRecord> resultsRecords = new ArrayList<>();
                 for (JsonElement element : detailsArray) {
-                    ResultsRecord record = gson.fromJson(element, ResultsRecord.class);
-                    resultsRecords.add(record);
+                    resultsRecords.add(gson.fromJson(element, ResultsRecord.class));
                 }
-
-// Log and process the ResultsRecord objects as needed
                 for (ResultsRecord record : resultsRecords) {
-                    MindrayCL1000i.logger.info("Sample ID: " + record.getSampleId()
-                            + ", Test: " + record.getTestCode()
-                            + ", Status: " + record.getStatus());
+                    logger.info("Result accepted — sampleId={}, testCode={}, status={}",
+                            record.getSampleId(), record.getTestCode(), record.getStatus());
                 }
-
             } else {
-                System.out.println("POST request failed. Response code: " + responseCode);
+                BufferedReader errReader = new BufferedReader(new InputStreamReader(conn.getErrorStream(), "utf-8"));
+                StringBuilder errBody = new StringBuilder();
+                String line;
+                while ((line = errReader.readLine()) != null) {
+                    errBody.append(line);
+                }
+                errReader.close();
+                logger.error("LIS push FAILED — responseCode={}, body={}", responseCode, errBody);
             }
         } catch (Exception e) {
-            e.printStackTrace();
+            logger.error("Exception while pushing results to LIS", e);
         }
     }
 

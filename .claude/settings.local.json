@@ -25,7 +25,28 @@
       "PowerShell(Get-Process *)",
       "PowerShell(Start-Process -FilePath \"java\" -ArgumentList \"-jar\", \"D:\\\\mindrayCL1000i_OLD\\\\target\\\\mindrayCL1000i-1.0.jar\" -RedirectStandardOutput \"D:\\\\mindrayCL1000i_OLD\\\\logs\\\\mw_new.log\" -RedirectStandardError \"D:\\\\mindrayCL1000i_OLD\\\\logs\\\\mw_new_err.log\" -NoNewWindow; Start-Sleep -Seconds 3; Get-Content \"D:\\\\mindrayCL1000i_OLD\\\\logs\\\\mw_new.log\" -Tail 15; Get-Content \"D:\\\\mindrayCL1000i_OLD\\\\logs\\\\mw_new_err.log\" -Tail 5)",
       "PowerShell(mvn *)",
-      "PowerShell(Get-Content *)"
+      "PowerShell(Get-Content *)",
+      "Bash(Get-Item \"D:\\\\mindrayCL1000i\\\\logs\\\\mw_new.log\")",
+      "Bash(Select-Object Length, LastWriteTime)",
+      "Bash(powershell *)",
+      "Bash(git -C \"D:\\\\mindrayCL1000i\" status)",
+      "Bash(git -C \"D:\\\\mindrayCL1000i\" log --oneline -5)",
+      "Bash(git *)",
+      "Bash(gh pr *)",
+      "Bash(where gh *)",
+      "Bash(gh auth *)",
+      "PowerShell(gh auth *)",
+      "PowerShell(& \"C:\\\\Program Files\\\\GitHub CLI\\\\gh.exe\" auth status 2>&1)",
+      "WebSearch",
+      "WebFetch(domain:www.mindray.com)",
+      "WebFetch(domain:mindray-service.de)",
+      "WebFetch(domain:www.scribd.com)",
+      "Bash(Get-Content *)",
+      "WebFetch(domain:pdfcoffee.com)",
+      "WebFetch(domain:www.youtube.com)",
+      "WebFetch(domain:pdf4pro.com)",
+      "WebFetch(domain:www.medwrench.com)",
+      "WebFetch(domain:frankshospitalworkshop.com)"
     ]
   }
 }

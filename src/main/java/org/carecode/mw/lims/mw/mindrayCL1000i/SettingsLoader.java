@@ -1,6 +1,8 @@
 package org.carecode.mw.lims.mw.mindrayCL1000i;
 
 import com.google.gson.Gson;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import java.io.FileReader;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -13,22 +15,20 @@ public class SettingsLoader {
 
     private static final Logger logger = LogManager.getLogger(SettingsLoader.class);
     private static MiddlewareSettings middlewareSettings;
+    private static ResultLogSettings resultLogSettings;
 
     public static void loadSettings() {
         Gson gson = new Gson();
         try {
-            // Read and print the contents of the config.json file
             String filePath = "D:\\ccmv\\settings\\mindrayCL1000i\\config.json";
             String jsonContent = new String(Files.readAllBytes(Paths.get(filePath)));
             System.out.println("Contents of config.json:");
             System.out.println(jsonContent);
 
-            // Now parse the JSON content
             try (FileReader reader = new FileReader(filePath)) {
                 middlewareSettings = gson.fromJson(reader, MiddlewareSettings.class);
                 logger.info("Settings loaded from config.json");
 
-                // Debugging output
                 System.out.println("MiddlewareSettings loaded:");
                 System.out.println(middlewareSettings);
 
@@ -44,6 +44,16 @@ public class SettingsLoader {
                     System.out.println("LimsSettings is null");
                 }
             }
+
+            JsonObject root = JsonParser.parseString(jsonContent).getAsJsonObject();
+            if (root.has("resultLogSettings")) {
+                resultLogSettings = gson.fromJson(root.get("resultLogSettings"), ResultLogSettings.class);
+                logger.info("ResultLogSettings loaded — logDir={}", resultLogSettings.getLogDir());
+            } else {
+                resultLogSettings = new ResultLogSettings();
+                logger.info("resultLogSettings not found in config.json — using defaults");
+            }
+
         } catch (IOException e) {
             logger.error("Failed to load settings from config.json", e);
             System.out.println("Failed to load settings: " + e.getMessage());
@@ -55,5 +65,12 @@ public class SettingsLoader {
             loadSettings();
         }
         return middlewareSettings;
+    }
+
+    public static ResultLogSettings getResultLogSettings() {
+        if (resultLogSettings == null) {
+            loadSettings();
+        }
+        return resultLogSettings;
     }
 }

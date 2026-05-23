@@ -274,9 +274,18 @@ public class MindrayCL1000iServer {
 
                         logger.info("Complete message received: " + message);
                         processMessage(message.toString(), clientSocket);
-                        out.write(ACK);
-                        out.flush();
-                        logger.info("Sent ACK after processing message.");
+                        try {
+                            out.write(ACK);
+                            out.flush();
+                            logger.info("Sent ACK after processing message.");
+                        } catch (IOException ackEx) {
+                            if (ackEx.getMessage() != null && ackEx.getMessage().contains("Connection reset")) {
+                                logger.info("Connection reset while sending ACK — analyzer closed after final record.");
+                            } else {
+                                logger.warn("IOException sending ACK: {}", ackEx.getMessage());
+                            }
+                            sessionActive = false;
+                        }
                         break;
 
                     case EOT:
@@ -294,8 +303,18 @@ public class MindrayCL1000iServer {
                 }
             }
         } catch (IOException e) {
-            logger.error("IOException in client communication loop.", e);
+            if (e.getMessage() != null && e.getMessage().contains("Connection reset")) {
+                logger.info("Connection reset by analyzer — session ended normally.");
+            } else {
+                logger.error("IOException in client communication loop.", e);
+            }
         } finally {
+            if (respondingResults && patientDataBundle != null && !patientDataBundle.getResultsRecords().isEmpty()) {
+                final DataBundle bundleToSend = patientDataBundle;
+                respondingResults = false;
+                logger.info("Pushing pending results to LIS after session ended (connection reset before EOT).");
+                new Thread(() -> LISCommunicator.pushResults(bundleToSend), "lis-push").start();
+            }
             logger.info("Client session ended.");
             try {
                 clientSocket.close();

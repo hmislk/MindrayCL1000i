@@ -1,3 +1,4 @@
 /target/
-/mindray_CL1000i_logs/
+/middlewere_logs/
 /document/
+*.log

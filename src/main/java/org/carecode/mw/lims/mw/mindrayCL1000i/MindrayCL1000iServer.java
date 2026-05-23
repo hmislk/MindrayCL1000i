@@ -190,12 +190,38 @@ public class MindrayCL1000iServer {
             clientSocket.setSoTimeout(30000); // 30s inter-frame timeout per ASTM spec
             logger.info("Socket timeout set to 30000ms");
 
-            // CL-1000i waits for the host to initiate — send ENQ as a greeting.
-            // handleAck() will send EOT immediately if no orders are pending,
-            // putting both sides into neutral mode and keeping the connection alive.
-            out.write(ENQ);
-            out.flush();
-            logger.info("Sent ENQ greeting to analyzer on connect.");
+            // Give the analyzer 3000ms to initiate first (send ENQ for Q or R records).
+            // CL-1000i needs time to scan barcode and decide to query host before sending ENQ.
+            // If it doesn't initiate, we take the turn with our own ENQ.
+            boolean analyzerInitiated = false;
+            clientSocket.setSoTimeout(3000);
+            try {
+                int firstByte = in.read();
+                if (firstByte == ENQ) {
+                    logger.info("Analyzer initiated with ENQ — sending ACK");
+                    out.write(ACK);
+                    out.flush();
+                    analyzerInitiated = true;
+                } else if (firstByte != -1) {
+                    logger.warn("Unexpected first byte from analyzer: 0x{} — will ignore and send ENQ", String.format("%02X", firstByte));
+                }
+            } catch (SocketTimeoutException e) {
+                logger.debug("Analyzer did not initiate within 3000ms — middleware sending ENQ");
+            } catch (IOException e) {
+                if (e.getMessage() != null && e.getMessage().contains("Connection reset")) {
+                    logger.info("Analyzer connected then immediately reset — probe connection, session ended normally.");
+                } else {
+                    logger.warn("I/O error during initial greeting from analyzer: {}", e.getMessage());
+                }
+                return;
+            }
+            clientSocket.setSoTimeout(30000);
+
+            if (!analyzerInitiated) {
+                out.write(ENQ);
+                out.flush();
+                logger.info("Sent ENQ greeting to analyzer on connect.");
+            }
 
             boolean sessionActive = true;
             while (sessionActive) {
@@ -248,9 +274,18 @@ public class MindrayCL1000iServer {
 
                         logger.info("Complete message received: " + message);
                         processMessage(message.toString(), clientSocket);
-                        out.write(ACK);
-                        out.flush();
-                        logger.info("Sent ACK after processing message.");
+                        try {
+                            out.write(ACK);
+                            out.flush();
+                            logger.info("Sent ACK after processing message.");
+                        } catch (IOException ackEx) {
+                            if (ackEx.getMessage() != null && ackEx.getMessage().contains("Connection reset")) {
+                                logger.info("Connection reset while sending ACK — analyzer closed after final record.");
+                            } else {
+                                logger.warn("IOException sending ACK: {}", ackEx.getMessage());
+                            }
+                            sessionActive = false;
+                        }
                         break;
 
                     case EOT:
@@ -268,8 +303,18 @@ public class MindrayCL1000iServer {
                 }
             }
         } catch (IOException e) {
-            logger.error("IOException in client communication loop.", e);
+            if (e.getMessage() != null && e.getMessage().contains("Connection reset")) {
+                logger.info("Connection reset by analyzer — session ended normally.");
+            } else {
+                logger.error("IOException in client communication loop.", e);
+            }
         } finally {
+            if (respondingResults && patientDataBundle != null && !patientDataBundle.getResultsRecords().isEmpty()) {
+                final DataBundle bundleToSend = patientDataBundle;
+                respondingResults = false;
+                logger.info("Pushing pending results to LIS after session ended (connection reset before EOT).");
+                new Thread(() -> LISCommunicator.pushResults(bundleToSend), "lis-push").start();
+            }
             logger.info("Client session ended.");
             try {
                 clientSocket.close();
@@ -280,8 +325,7 @@ public class MindrayCL1000iServer {
     }
 
     private void handleAck(Socket clientSocket, OutputStream out) throws IOException {
-        System.out.println("handleAck = ");
-        System.out.println("needToSendHeaderRecordForQuery = " + needToSendHeaderRecordForQuery);
+        logger.debug("handleAck — needToSendHeaderRecordForQuery={}", needToSendHeaderRecordForQuery);
         if (needToSendHeaderRecordForQuery) {
             logger.debug("Sending Header");
             String hm = createLimsHeaderRecord();
@@ -304,9 +348,13 @@ public class MindrayCL1000iServer {
             needToSendPatientRecordForQuery = false;
             needToSendOrderingRecordForQuery = true;
         } else if (needToSendOrderingRecordForQuery) {
-            logger.debug("Creating Order record ");
-            if (testNames == null || testNames.isEmpty()) {
-                testNames = Arrays.asList("Gluc GP");
+            logger.debug("Creating Order record");
+            if (getPatientDataBundle().getOrderRecords() == null || getPatientDataBundle().getOrderRecords().isEmpty()) {
+                logger.warn("No order records returned from LIS — sending termination record directly");
+                needToSendOrderingRecordForQuery = false;
+                needToSendEotForRecordForQuery = true;
+                handleAck(clientSocket, out);
+                return;
             }
             orderRecord = getPatientDataBundle().getOrderRecords().get(0);
             orderRecord.setFrameNumber(frameNumber);
@@ -316,31 +364,33 @@ public class MindrayCL1000iServer {
             needToSendOrderingRecordForQuery = false;
             needToSendEotForRecordForQuery = true;
         } else if (needToSendEotForRecordForQuery) {
-            System.out.println("Creating an End record = ");
+            logger.debug("Sending termination record");
             String tmq = createLimsTerminationRecord(frameNumber, terminationCode);
             sendResponse(tmq, clientSocket);
             needToSendEotForRecordForQuery = false;
+            needToSendFinalEot = true;
+        } else if (needToSendFinalEot) {
+            out.write(EOT);
+            out.flush();
+            needToSendFinalEot = false;
             receivingQuery = false;
             receivingResults = false;
             respondingQuery = false;
             respondingResults = false;
-        } else if (needToSendFinalEot) {
-            // Instrument ACKed our empty H+L frame — now close the transmission
-            out.write(EOT);
-            out.flush();
-            needToSendFinalEot = false;
-            logger.info("Sent EOT after empty H+L handshake — connection now in neutral mode.");
+            logger.info("Sent EOT — transmission complete, connection in neutral mode.");
         } else {
-            // No pending orders: send a minimal H+L frame so the analyzer accepts the session
-            // and enters neutral mode rather than resetting the connection.
+            // Send H+Q+L to ask the analyzer what samples are queued (host-initiated query).
+            // The analyzer should respond with ENQ + O records listing sample IDs and tests.
             frameNumber = 1;
-            String emptyContent = createLimsHeaderRecord() + CR + createLimsTerminationRecord(frameNumber, 'N');
-            String emptyFrame = buildASTMMessage(emptyContent);
+            String queryContent = createLimsHeaderRecord() + CR
+                    + createHostQueryRecord() + CR
+                    + createLimsTerminationRecord(2, 'N');
+            String queryFrame = buildASTMMessage(queryContent);
             OutputStream sessionOut = new BufferedOutputStream(clientSocket.getOutputStream());
-            sessionOut.write(emptyFrame.getBytes());
+            sessionOut.write(queryFrame.getBytes());
             sessionOut.flush();
             needToSendFinalEot = true;
-            logger.info("Sent empty H+L frame — awaiting ACK before EOT.");
+            logger.info("Sent H+Q+L host query frame — awaiting ACK before EOT.");
         }
     }
 
@@ -357,11 +407,23 @@ public class MindrayCL1000iServer {
     }
 
     private void handleEot(OutputStream out) throws IOException {
-        logger.debug("Handling eot");
-        logger.debug(respondingQuery);
+        logger.debug("Handling EOT — respondingQuery={}, respondingResults={}", respondingQuery, respondingResults);
         if (respondingQuery) {
-            patientDataBundle = LISCommunicator.pullTestOrdersForSampleRequests(patientDataBundle.getQueryRecords().get(0));
-            logger.debug("Starting Transmission to send test requests");
+            if (patientDataBundle.getQueryRecords().isEmpty()) {
+                logger.error("respondingQuery=true but no query record in bundle — cannot fetch orders");
+                respondingQuery = false;
+                return;
+            }
+            logger.info("Fetching test orders from LIS for query");
+            DataBundle ordersBundle = LISCommunicator.pullTestOrdersForSampleRequests(patientDataBundle.getQueryRecords().get(0));
+            if (ordersBundle == null) {
+                logger.error("LIS returned null for sample orders — cannot send orders to analyzer");
+                respondingQuery = false;
+                needToSendHeaderRecordForQuery = false;
+                return;
+            }
+            patientDataBundle = ordersBundle;
+            logger.info("Orders received from LIS — sending ENQ to begin order transmission");
             out.write(ENQ);
             out.flush();
             logger.debug("Sent ENQ");
@@ -562,6 +624,12 @@ public class MindrayCL1000iServer {
         String hr13 = "1394-97";
         String hr14 = new SimpleDateFormat("yyyyMMddHHmmss").format(new Date());
         return hr1 + hr2 + fieldD + hr3 + fieldD + hr4 + fieldD + hr5 + fieldD + hr6 + fieldD + hr7 + fieldD + hr8 + fieldD + hr9 + fieldD + hr10 + fieldD + hr11 + fieldD + hr12 + fieldD + hr13 + fieldD + hr14;
+    }
+
+    public String createHostQueryRecord() {
+        // ASTM Q record: host asks analyzer for all pending sample orders.
+        // Field 12 = "O" requests Order records in response.
+        return "1Q|1|ALL|||||||||||O";
     }
 
     public String createLimsOrderRecord(OrderRecord order) {
@@ -817,11 +885,10 @@ public class MindrayCL1000iServer {
     }
 
     public QueryRecord parseQueryRecord(String querySegment) {
-        System.out.println("querySegment = " + querySegment);
+        logger.info("Parsing Q record: {}", querySegment);
         String tmpSampleId = extractSampleIdFromQueryRecord(querySegment);
-        System.out.println("tmpSampleId = " + tmpSampleId);
+        logger.info("Sample ID from Q record: {}", tmpSampleId);
         sampleId = tmpSampleId;
-        System.out.println("Sample ID: " + tmpSampleId); // Debugging
         return new QueryRecord(
                 0,
                 tmpSampleId,

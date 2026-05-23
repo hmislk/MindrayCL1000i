@@ -1,3 +1,1 @@
-# Indiko Plus Middleware
-"# MindrayCL1000i" 
-"# MindrayCL1000i" 
+# Mindray CL1000i

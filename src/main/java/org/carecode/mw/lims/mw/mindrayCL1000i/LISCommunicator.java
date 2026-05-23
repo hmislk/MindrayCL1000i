@@ -30,6 +30,8 @@ public class LISCommunicator {
             logger.info("Querying LIS for orders: {}", endpoint);
             URL url = new URL(endpoint);
             HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            conn.setConnectTimeout(10000);
+            conn.setReadTimeout(30000);
             conn.setRequestMethod("POST");
             conn.setRequestProperty("Content-Type", "application/json");
             conn.setRequestProperty("Accept", "application/json");
@@ -72,12 +74,31 @@ public class LISCommunicator {
                 logger.error("LIS order query FAILED — responseCode={}, body={}", responseCode, errBody);
             }
         } catch (Exception e) {
-            logger.error("Exception while querying orders from LIS", e);
+            logger.error("Exception while querying orders from LIS — check that the LIS server is reachable at: {}",
+                    SettingsLoader.getSettings().getLimsSettings().getLimsServerBaseUrl(), e);
         }
         return null;
     }
 
+    private static void fixResultSampleIds(DataBundle bundle) {
+        if (bundle.getPatientRecord() == null) {
+            logger.warn("fixResultSampleIds — no patientRecord in bundle, sampleIds unchanged");
+            return;
+        }
+        String correctId = bundle.getPatientRecord().getAdditionalId();
+        if (correctId == null || correctId.isEmpty()) {
+            logger.warn("fixResultSampleIds — patientRecord.additionalId is blank, sampleIds unchanged");
+            return;
+        }
+        for (ResultsRecord rr : bundle.getResultsRecords()) {
+            logger.info("fixResultSampleIds — replacing sampleId '{}' with additionalId '{}'", rr.getSampleId(), correctId);
+            rr.setSampleId(correctId);
+        }
+    }
+
     public static void pushResults(DataBundle patientDataBundle) {
+        fixResultSampleIds(patientDataBundle);
+        ResultFileLogger.logResults(patientDataBundle.getResultsRecords());
         logger.info("pushResults called");
         try {
             String pushResultsEndpoint = SettingsLoader.getSettings().getLimsSettings().getLimsServerBaseUrl() + "/test_results";
@@ -90,6 +111,8 @@ public class LISCommunicator {
 
             URL url = new URL(pushResultsEndpoint);
             HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            conn.setConnectTimeout(10000);
+            conn.setReadTimeout(30000);
             conn.setRequestMethod("POST");
             conn.setRequestProperty("Content-Type", "application/json");
             conn.setRequestProperty("Accept", "application/json");
@@ -141,7 +164,8 @@ public class LISCommunicator {
                 logger.error("LIS push FAILED — responseCode={}, body={}", responseCode, errBody);
             }
         } catch (Exception e) {
-            logger.error("Exception while pushing results to LIS", e);
+            logger.error("Exception while pushing results to LIS — check that the LIS server is reachable at: {}",
+                    SettingsLoader.getSettings().getLimsSettings().getLimsServerBaseUrl(), e);
         }
     }
 
